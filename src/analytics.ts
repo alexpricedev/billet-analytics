@@ -10,7 +10,11 @@ import {
   referrerHost,
   utm,
 } from "./classify";
-import { createEventsHandler, type EndpointOptions } from "./endpoint";
+import {
+  createEventsHandler,
+  type EndpointOptions,
+  parseSiteOrigin,
+} from "./endpoint";
 import {
   type BuiltInEvents,
   type EventProps,
@@ -134,6 +138,23 @@ const formOutcome = (status: number) =>
         ? "error"
         : "ok";
 
+// A redirect's target as a pattern on our own site, or only the host when it
+// leaves the site, so an external URL's path and query are never stored.
+const redirectTarget = (
+  req: Request,
+  location: string,
+  siteOrigin: string | null,
+): string | null => {
+  try {
+    const url = new URL(location, req.url);
+    return url.origin === new URL(req.url).origin || url.origin === siteOrigin
+      ? normalizePath(url.pathname)
+      : url.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+};
+
 const defaultOnError = (message: string, error: unknown): void => {
   console.error(`[analytics] ${message}: ${String(error)}`);
 };
@@ -160,6 +181,7 @@ export const createAnalytics = <
     config.sessionChangingRoutes ?? DEFAULT_SESSION_CHANGING_ROUTES,
   );
   const siteUrl = config.siteUrl ?? process.env.APP_URL;
+  const siteOrigin = parseSiteOrigin(siteUrl);
   const clientIp = config.clientIp ?? forwardedClientIp;
   const onError = config.onError ?? defaultOnError;
   let enabled = config.enabled ?? process.env.NODE_ENV !== "test";
@@ -261,7 +283,7 @@ export const createAnalytics = <
         occurred_at, name, source, visitor_hash, route, method, status, authenticated,
         referrer_host, utm_source, utm_medium, utm_campaign, device, browser, props
       ) VALUES (
-        ${roundTimestamp(rounding).toISOString()}, ${input.name}, ${input.source}, ${ctx.visitorHash},
+        ${roundTimestamp(rounding, timeZone).toISOString()}, ${input.name}, ${input.source}, ${ctx.visitorHash},
         ${input.route ?? null}, ${input.method ?? null}, ${input.status ?? null}, ${ctx.authenticated},
         ${ctx.referrerHost}, ${ctx.utmSource}, ${ctx.utmMedium}, ${ctx.utmCampaign},
         ${ctx.device}, ${ctx.browser}, ${props}::text::jsonb
@@ -340,13 +362,16 @@ export const createAnalytics = <
     }
     if (req.method === "POST") {
       const location = res.headers.get("location");
+      const target = location
+        ? redirectTarget(req, location, siteOrigin)
+        : null;
       await recordEvent(req, {
         ...base,
         name: "form_submit",
         route,
         props: {
           outcome: formOutcome(res.status),
-          ...(location ? { target: normalizePath(location) } : {}),
+          ...(target ? { target } : {}),
         },
       });
     }
@@ -374,8 +399,9 @@ export const createAnalytics = <
 
   const handleEvents = createEventsHandler({
     options: config.endpoint,
-    siteUrl,
+    siteOrigin,
     clientIp,
+    onError,
     accepts: (name): name is Name => isEventName(name) && isClientEvent(name),
     record: (req, name, route, props) =>
       recordEvent(req, { name, source: "client", route, props }),

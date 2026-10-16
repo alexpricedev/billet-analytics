@@ -19,7 +19,11 @@ export {
   SAFE_STRING,
   utm,
 } from "./classify";
-export { DEFAULT_MAX_BODY_BYTES, type EndpointOptions } from "./endpoint";
+export {
+  DEFAULT_MAX_BODY_BYTES,
+  type EndpointOptions,
+  MAX_TRACKED_CLIENTS,
+} from "./endpoint";
 export {
   BUILT_IN_EVENTS,
   defineEvents,

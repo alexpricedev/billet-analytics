@@ -329,6 +329,26 @@ describe("createAnalytics", () => {
       expect(ok?.props).toEqual({ outcome: "ok" });
     });
 
+    test("an absolute Location keeps the path on our site and only the host off it", async () => {
+      const analytics = make({ siteUrl: "https://www.example.org" });
+      const submit = (location: string) =>
+        analytics.captureRequest(
+          visit("https://site.test/login", { method: "POST" }),
+          "/login",
+          new Response(null, { status: 303, headers: { location } }),
+        );
+      await submit("https://site.test/projects/42?welcome=1");
+      await submit("https://www.example.org/dashboard");
+      await submit("https://Accounts.Google.com/o/oauth2/auth?client_id=x");
+      await submit("../account");
+      expect((await events()).map((r) => r.props.target)).toEqual([
+        "/projects/:n",
+        "/dashboard",
+        "accounts.google.com",
+        "/account",
+      ]);
+    });
+
     test("records 404s and 500s, grouped without raw paths", async () => {
       const analytics = make();
       await analytics.captureRequest(
@@ -473,12 +493,15 @@ describe("createAnalytics", () => {
       expect(stored).toBeLessThanOrEqual(Date.now() + 1);
     });
 
-    test("roundTimestamps: day truncates to midnight UTC", async () => {
-      const analytics = make({ roundTimestamps: "day" });
+    test("roundTimestamps: day truncates to local midnight", async () => {
+      const analytics = make({
+        roundTimestamps: "day",
+        timeZone: "Asia/Kolkata",
+      });
       await analytics.track(visit("https://site.test/"), "project_created");
       const [row] = await events();
-      expect(new Date(row!.occurred_at).toISOString()).toMatch(
-        /T00:00:00\.000Z$/,
+      expect(new Date(row!.occurred_at).toISOString()).toBe(
+        analytics.startOfDay().toISOString(),
       );
     });
 

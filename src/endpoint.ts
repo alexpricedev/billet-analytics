@@ -17,9 +17,13 @@ export interface EndpointOptions {
 
 export const DEFAULT_MAX_BODY_BYTES = 2048;
 
+/** The most clients the rate limiter remembers at once. */
+export const MAX_TRACKED_CLIENTS = 10_000;
+
 interface HandlerDeps<N extends string> {
   options: EndpointOptions | undefined;
-  siteUrl: string | undefined;
+  /** The site's public origin, already parsed. */
+  siteOrigin: string | null;
   clientIp: (req: Request) => string;
   accepts: (name: unknown) => name is N;
   record: (
@@ -28,12 +32,14 @@ interface HandlerDeps<N extends string> {
     route: string | null,
     props: unknown,
   ) => Promise<void>;
+  onError: (message: string, error: unknown) => void;
 }
 
 const noContent = () => new Response(null, { status: 204 });
 
 // Its own in-memory budget, so beacons never spend a form's rate limit. One
-// sweep per window keeps the map from growing with every address seen.
+// sweep per window keeps the map from growing with every address seen, and a
+// hard cap (oldest client out first) bounds it within a window too.
 const createLimiter = (maxRequests: number, windowMs: number) => {
   const log = new Map<string, number[]>();
   let lastSweep = Date.now();
@@ -48,9 +54,48 @@ const createLimiter = (maxRequests: number, windowMs: number) => {
     const recent = (log.get(key) ?? []).filter((t) => now - t < windowMs);
     if (recent.length >= maxRequests) return true;
     recent.push(now);
+    log.delete(key);
+    if (log.size >= MAX_TRACKED_CLIENTS) {
+      log.delete(log.keys().next().value as string);
+    }
     log.set(key, recent);
     return false;
   };
+};
+
+// Reads at most `maxBytes` of the body, counting bytes rather than characters,
+// and stops reading as soon as it passes the cap. Null when it's too big.
+const readCapped = async (
+  req: Request,
+  maxBytes: number,
+): Promise<string | null> => {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+};
+
+/** Throws a clear config error when `siteUrl` isn't an absolute URL. */
+export const parseSiteOrigin = (siteUrl: string | undefined): string | null => {
+  if (!siteUrl) return null;
+  try {
+    return new URL(siteUrl).origin;
+  } catch {
+    throw new Error(
+      `billet-analytics: siteUrl (or APP_URL) must be an absolute URL, got "${siteUrl}"`,
+    );
+  }
 };
 
 export const createEventsHandler = <N extends string>(deps: HandlerDeps<N>) => {
@@ -65,29 +110,25 @@ export const createEventsHandler = <N extends string>(deps: HandlerDeps<N>) => {
     if (site) return site === "same-origin";
     const origin = req.headers.get("origin");
     if (!origin) return false;
-    const allowed = [new URL(req.url).origin];
-    if (deps.siteUrl) allowed.push(new URL(deps.siteUrl).origin);
-    return allowed.includes(origin);
+    return origin === new URL(req.url).origin || origin === deps.siteOrigin;
   };
 
-  return async (req: Request): Promise<Response> => {
-    if (req.method !== "POST") return noContent();
-    if (!sameOrigin(req)) return noContent();
-    if (limited(deps.clientIp(req))) return noContent();
-    if (Number(req.headers.get("content-length")) > maxBodyBytes) {
-      return noContent();
-    }
+  const handle = async (req: Request): Promise<void> => {
+    if (req.method !== "POST") return;
+    if (!sameOrigin(req)) return;
+    if (limited(deps.clientIp(req))) return;
+    if (Number(req.headers.get("content-length")) > maxBodyBytes) return;
 
     let body: { name?: unknown; props?: unknown; path?: unknown };
     try {
-      const text = await req.text();
-      if (text.length > maxBodyBytes) return noContent();
+      const text = await readCapped(req, maxBodyBytes);
+      if (text === null) return;
       body = JSON.parse(text) as typeof body;
     } catch {
-      return noContent();
+      return;
     }
-    if (typeof body !== "object" || body === null) return noContent();
-    if (!deps.accepts(body.name)) return noContent();
+    if (typeof body !== "object" || body === null) return;
+    if (!deps.accepts(body.name)) return;
 
     void deps.record(
       req,
@@ -95,6 +136,14 @@ export const createEventsHandler = <N extends string>(deps: HandlerDeps<N>) => {
       typeof body.path === "string" ? normalizePath(body.path) : null,
       body.props,
     );
+  };
+
+  return async (req: Request): Promise<Response> => {
+    try {
+      await handle(req);
+    } catch (err) {
+      deps.onError("Events endpoint failed", err);
+    }
     return noContent();
   };
 };

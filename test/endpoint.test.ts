@@ -4,6 +4,7 @@ import {
   createAnalytics,
   DEFAULT_MAX_BODY_BYTES,
   defineEvents,
+  MAX_TRACKED_CLIENTS,
 } from "../src/index";
 import { CHROME, db, resetSchema, truncate, waitForRows } from "./helpers";
 
@@ -182,6 +183,91 @@ describe("events endpoint", () => {
     expect(padded.length).toBe(DEFAULT_MAX_BODY_BYTES);
     const res = await make().handleEvents(beacon(padded));
     expect(res.status).toBe(204);
+    expect(await waitForRows(rows, 1)).toHaveLength(1);
+  });
+
+  test("drops a streamed body that passes the cap, with no Content-Length", async () => {
+    const chunk = new TextEncoder().encode("a".repeat(1024));
+    let pulls = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        if (pulls > 100) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const req = new Request("https://site.test/api/events", {
+      method: "POST",
+      body: stream,
+      headers: {
+        "user-agent": CHROME,
+        "sec-fetch-site": "same-origin",
+        "x-forwarded-for": "198.51.100.4",
+      },
+    });
+    expect(req.headers.get("content-length")).toBeNull();
+    const res = await make().handleEvents(req);
+    expect(res.status).toBe(204);
+    // It stopped reading a few chunks past the 2 KB cap, not at the end.
+    expect(pulls).toBeLessThan(10);
+    expect(await waitForRows(rows, 0)).toHaveLength(0);
+  });
+
+  test("counts the cap in bytes, not characters", async () => {
+    const base = JSON.stringify({ name: "report_printed", path: "/" });
+    // "é" is one UTF-16 unit but two UTF-8 bytes.
+    const body = JSON.stringify({
+      name: "report_printed",
+      path: `/${"é".repeat(DEFAULT_MAX_BODY_BYTES - base.length)}`,
+    });
+    expect(body.length).toBe(DEFAULT_MAX_BODY_BYTES);
+    const req = beacon(body);
+    req.headers.delete("content-length");
+    await make().handleEvents(req);
+    expect(await waitForRows(rows, 0)).toHaveLength(0);
+  });
+
+  test("a throwing clientIp is reported and still answers 204", async () => {
+    const errors: string[] = [];
+    const analytics = make({
+      clientIp: () => {
+        throw new Error("no socket");
+      },
+      onError: (message) => errors.push(message),
+    });
+    const res = await analytics.handleEvents(
+      beacon({ name: "report_printed" }),
+    );
+    expect(res.status).toBe(204);
+    expect(errors).toEqual(["Events endpoint failed"]);
+    expect(await waitForRows(rows, 0)).toHaveLength(0);
+  });
+
+  test("a siteUrl that isn't a URL is a config error", () => {
+    expect(() => make({ siteUrl: "site.test" })).toThrow(
+      "siteUrl (or APP_URL) must be an absolute URL",
+    );
+  });
+
+  test("the limiter forgets the oldest client past MAX_TRACKED_CLIENTS", async () => {
+    const analytics = make({
+      enabled: false,
+      endpoint: { maxRequests: 1, windowMs: 60_000 },
+    });
+    let ip = "198.51.100.1";
+    const send = () =>
+      analytics.handleEvents(
+        beacon({ name: "report_printed" }, { "x-forwarded-for": ip }),
+      );
+    await send();
+    for (let i = 0; i < MAX_TRACKED_CLIENTS; i++) {
+      ip = `10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`;
+      await send();
+    }
+    // The first client was evicted, so it gets a fresh budget.
+    analytics.setEnabled(true);
+    ip = "198.51.100.1";
+    await send();
     expect(await waitForRows(rows, 1)).toHaveLength(1);
   });
 

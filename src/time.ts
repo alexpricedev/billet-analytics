@@ -89,11 +89,24 @@ export const startOfDay = (
 /**
  * Stored timestamps are coarse on purpose: most events happen at the same
  * moment as a write to an account table, so an exact time would let the two be
- * joined and the visitor hash tied to a person.
+ * joined and the visitor hash tied to a person. Rounds on the zone's wall
+ * clock, so a "day" row sits at local midnight and lands in its local-day
+ * bucket, and an "hour" row in a half-hour zone (Asia/Kolkata) stays on the
+ * local hour.
  */
-export const roundTimestamp = (rounding: Rounding, now = new Date()): Date => {
-  const at = new Date(now);
-  if (rounding === "hour") at.setUTCMinutes(0, 0, 0);
-  if (rounding === "day") at.setUTCHours(0, 0, 0, 0);
-  return at;
+export const roundTimestamp = (
+  rounding: Rounding,
+  timeZone: string,
+  now = new Date(),
+): Date => {
+  if (rounding === "day") return startOfDay(timeZone, now);
+  if (rounding === "hour") {
+    const at = now.getTime();
+    const offset = offsetAt(timeZone, at);
+    const wall = at + offset;
+    return new Date(
+      wall - (((wall % 3_600_000) + 3_600_000) % 3_600_000) - offset,
+    );
+  }
+  return new Date(now);
 };

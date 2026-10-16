@@ -121,12 +121,13 @@ export const EVENTS = defineEvents({
 });
 
 // Read-only lookup, once per request: getSessionContext would mint a guest
-// session, and analytics must never create one.
+// session, and analytics must never create one. The `fetch` fallback (404s)
+// gets a plain Request with no `.cookies`, so only routed requests are read.
 const sessions = new WeakMap<Request, Promise<SessionContext | null>>();
 const sessionFor = (req: Request): Promise<SessionContext | null> => {
   let lookup = sessions.get(req);
   if (!lookup) {
-    const id = getSessionIdFromRequest(req as BunRequest);
+    const id = "cookies" in req ? getSessionIdFromRequest(req as BunRequest) : null;
     lookup = id ? getSessionContextFromDB(id) : Promise.resolve(null);
     sessions.set(req, lookup);
   }
@@ -144,6 +145,8 @@ export const analytics = createAnalytics({
 ```
 
 `clientKey` is Billet's rate-limit key: the socket address, or the last `X-Forwarded-For` hop when `TRUST_PROXY=true`. Pass whatever your app trusts.
+
+Without `clientIp`, the package uses the last `X-Forwarded-For` entry. That is only safe behind a proxy that appends the caller's address (Railway, Fly, most load balancers). With no proxy, a caller can send any `X-Forwarded-For` they like, which gets round the endpoint's rate limit and splits one visitor into many; with no header at all, every caller shares one budget. In either case pass a `clientIp` that reads the socket address.
 
 ### 3. Capture every routed request
 
@@ -216,7 +219,7 @@ export const apiRoutes = {
 };
 ```
 
-It only accepts events registered with `source: "client"`, checks the request is same-origin (`Sec-Fetch-Site`, or `Origin` against the request and `siteUrl`), rate limits each client (60 a minute, its own budget), caps the body at 2 KB and always answers 204 without waiting for the write. There's no CSRF token: `sendBeacon` can't set headers, and all it can do is append an allow-listed, anonymous event.
+It only accepts events registered with `source: "client"`, checks the request is same-origin (`Sec-Fetch-Site`, or `Origin` against the request and `siteUrl`), rate limits each client (60 a minute, its own budget, remembering at most 10,000 clients), caps the body at 2 KB (counted in bytes as it streams in) and always answers 204 without waiting for the write. There's no CSRF token: `sendBeacon` can't set headers, and all it can do is append an allow-listed, anonymous event.
 
 ### 5. Send client events
 
@@ -253,6 +256,20 @@ beforeEach(() => analytics.setEnabled(true));
 afterEach(() => analytics.setEnabled(false));
 ```
 
+Capture is fire-and-forget: `handleGuarded` doesn't await `captureRequest`, and the events endpoint answers before its write lands. So a test that makes a request and then reads `analytics_event` straight away can miss the row. Either call `captureRequest` (or `track`) yourself and await it, or poll for the row:
+
+```ts
+const waitForEvent = async (name: string, timeoutMs = 1000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [row] = await db`SELECT * FROM analytics_event WHERE name = ${name}`;
+    if (row) return row;
+    await Bun.sleep(10);
+  }
+  throw new Error(`No ${name} event within ${timeoutMs}ms`);
+};
+```
+
 The package binds every value as a primitive (props go in as text and are cast to `jsonb`), so it works through Billet's guarded `db` pool unchanged.
 
 ## Config
@@ -266,7 +283,7 @@ The package binds every value as a primitive (props go in as text and are cast t
 | `exclude(req)` | nobody | Drop staff, admins or test accounts at write time |
 | `authenticated(req)` | `false` | You want signed-in vs guest. Must not create a session. |
 | `visitorId(req)` | daily-salted hash of IP + UA | Rarely. See "What overriding a default changes". |
-| `clientIp(req)` | last `X-Forwarded-For` entry | Your app has its own trusted IP source (Billet's `clientKey`) |
+| `clientIp(req)` | last `X-Forwarded-For` entry (only safe behind an appending proxy) | Your app has its own trusted IP source (Billet's `clientKey`), or runs without a proxy |
 | `retentionMonths` | `13` | A shorter (or justified longer) retention |
 | `roundTimestamps` | `"hour"` | `"day"` for coarser; `"none"` only with a privacy reason |
 | `timeZone` | `"Europe/London"` | The site's audience lives elsewhere. Moves the salt day and report buckets. |
@@ -288,7 +305,7 @@ export const EVENTS = defineEvents({
 
 A prop is `"string"` (must pass `SAFE_STRING`), `"number"` (finite), `"boolean"`, or a list of allowed strings. Anything else, and any key not listed, is dropped before it's written. `source: "client"` events may arrive through the endpoint; `"server"` ones never do. The built-in `page_view`, `form_submit` (`outcome`, `target`), `not_found` and `server_error` can't be redefined.
 
-`captureRequest` turns a finished request into at most one event: a `page_view` for a routed `GET` answering 200 HTML, a `form_submit` for a routed `POST` (outcome `ok`, `redirect`, `error` or `rate_limited`, and the redirect target as a pattern), `not_found` for a 404 and `server_error` for a 5xx.
+`captureRequest` turns a finished request into at most one event: a `page_view` for a routed `GET` answering 200 HTML, a `form_submit` for a routed `POST` (outcome `ok`, `redirect`, `error` or `rate_limited`, and the redirect target as a pattern, or only its host when it leaves the site), `not_found` for a 404 and `server_error` for a 5xx.
 
 ## Read helpers
 

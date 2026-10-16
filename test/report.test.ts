@@ -126,6 +126,47 @@ describe("report", () => {
     ]);
   });
 
+  test("a row exactly at `to` is outside the period everywhere", async () => {
+    await db`INSERT INTO analytics_event
+      (occurred_at, name, source, visitor_hash, route, referrer_host, device, browser, props)
+    VALUES (${period.to.toISOString()}, 'page_view', 'server', 'edge', '/edge', 'edge.test', 'tablet', 'Edge', '{}')`;
+    expect(await report.kpis(period)).toEqual({
+      visitors: 3,
+      pageViews: 4,
+      events: 7,
+      counts: {},
+    });
+    expect(await report.timeSeries(period)).toEqual([
+      { bucket: "2026-10-06", visitors: 2, pageViews: 3 },
+      { bucket: "2026-10-07", visitors: 1, pageViews: 1 },
+    ]);
+    const routes = await report.breakdown(period, "route");
+    expect(routes.map((r) => r.label)).not.toContain("/edge");
+    const hosts = await report.breakdown(period, "referrer_host");
+    expect(hosts.map((r) => r.label)).not.toContain("edge.test");
+    const tallies = await report.eventTallies(period);
+    expect(tallies.find((t) => t.label === "page_view")?.count).toBe(4);
+  });
+
+  test("an empty period gives zeros and empty buckets", async () => {
+    const empty = {
+      from: new Date("2026-09-01T23:00:00Z"),
+      to: new Date("2026-09-03T23:00:00Z"),
+    };
+    expect(await report.kpis(empty, { events: ["cta_click"] })).toEqual({
+      visitors: 0,
+      pageViews: 0,
+      events: 0,
+      counts: { cta_click: 0 },
+    });
+    expect(await report.timeSeries(empty)).toEqual([
+      { bucket: "2026-09-02", visitors: 0, pageViews: 0 },
+      { bucket: "2026-09-03", visitors: 0, pageViews: 0 },
+    ]);
+    expect(await report.breakdown(empty, "route")).toEqual([]);
+    expect(await report.eventTallies(empty)).toEqual([]);
+  });
+
   test("startOfDay gives a period of whole local days", async () => {
     const now = new Date("2026-10-07T12:00:00Z");
     const from = analytics.startOfDay(now, 1);
