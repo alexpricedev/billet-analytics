@@ -183,7 +183,14 @@ export const createAnalytics = <
   const siteUrl = config.siteUrl ?? process.env.APP_URL;
   const siteOrigin = parseSiteOrigin(siteUrl);
   const clientIp = config.clientIp ?? forwardedClientIp;
-  const onError = config.onError ?? defaultOnError;
+  const reportError = config.onError ?? defaultOnError;
+  // Recording is best-effort, so a throwing onError is dropped rather than
+  // reaching the request.
+  const onError = (message: string, error: unknown): void => {
+    try {
+      reportError(message, error);
+    } catch {}
+  };
   let enabled = config.enabled ?? process.env.NODE_ENV !== "test";
 
   const isEventName = (name: unknown): name is Name =>
@@ -263,6 +270,7 @@ export const createAnalytics = <
    * mid-request that the caller is excluded, e.g. an admin signing in.
    */
   const markExcluded = (req: Request): void => {
+    if (!enabled) return;
     const ctx = requestContext(req).then((c) => c && { ...c, excluded: true });
     contexts.set(req, ctx);
   };

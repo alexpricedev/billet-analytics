@@ -243,6 +243,21 @@ describe("events endpoint", () => {
     expect(await waitForRows(rows, 0)).toHaveLength(0);
   });
 
+  test("a throwing onError still answers 204", async () => {
+    const analytics = make({
+      clientIp: () => {
+        throw new Error("no socket");
+      },
+      onError: () => {
+        throw new Error("logger down");
+      },
+    });
+    const res = await analytics.handleEvents(
+      beacon({ name: "report_printed" }),
+    );
+    expect(res.status).toBe(204);
+  });
+
   test("a siteUrl that isn't a URL is a config error", () => {
     expect(() => make({ siteUrl: "site.test" })).toThrow(
       "siteUrl (or APP_URL) must be an absolute URL",

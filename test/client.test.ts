@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { send } from "../src/client";
 
-type Beacon = { url: string; body: string };
+type Beacon = { url: string; body: string; type: string };
 
 const globals = globalThis as unknown as {
   navigator: { sendBeacon?: (url: string, data: Blob) => boolean };
@@ -23,10 +23,19 @@ describe("client send", () => {
       configurable: true,
       value: {
         sendBeacon: (url: string, data: Blob) => {
-          void data.text().then((body) => beacons.push({ url, body }));
+          void data
+            .text()
+            .then((body) => beacons.push({ url, body, type: data.type }));
           return accepts;
         },
       },
+    });
+  };
+
+  const useNavigator = (value: object) => {
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value,
     });
   };
 
@@ -67,6 +76,7 @@ describe("client send", () => {
           props: { id: "hero" },
           path: "/projects/42",
         }),
+        type: "text/plain;charset=utf-8",
       },
     ]);
     expect(fetches).toHaveLength(0);
@@ -86,6 +96,35 @@ describe("client send", () => {
     expect(fetches[0]?.url).toBe("/api/events");
     expect(fetches[0]?.init.keepalive).toBe(true);
     expect(fetches[0]?.init.method).toBe("POST");
+  });
+
+  test("the fallback fetch carries the beacon's body and content type", async () => {
+    useBeacon(false);
+    send("cta_click", { id: "hero" });
+    await Bun.sleep(5);
+    const [sent] = beacons;
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]?.init.body).toBe(sent?.body);
+    expect(
+      new Headers(fetches[0]?.init.headers).get("content-type")?.toLowerCase(),
+    ).toBe(sent?.type);
+  });
+
+  test("falls back to fetch when sendBeacon is missing", () => {
+    useNavigator({});
+    send("report_printed");
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]?.init.keepalive).toBe(true);
+  });
+
+  test("falls back to fetch when sendBeacon throws", () => {
+    useNavigator({
+      sendBeacon: () => {
+        throw new TypeError("blocked");
+      },
+    });
+    send("report_printed");
+    expect(fetches).toHaveLength(1);
   });
 
   test("never throws, even with no browser globals", () => {

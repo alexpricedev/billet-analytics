@@ -178,6 +178,30 @@ describe("createAnalytics", () => {
       expect(errors).toEqual(["Failed to record project_created"]);
     });
 
+    test("never throws into a request when onError throws too", async () => {
+      const analytics = make({
+        exclude: (req) => {
+          if (req.headers.has("x-broken")) throw new Error("no session store");
+          return false;
+        },
+        onError: () => {
+          throw new Error("logger down");
+        },
+      });
+      await db`ALTER TABLE analytics_event RENAME TO analytics_event_away`;
+      try {
+        // A failed write, then a failed context lookup.
+        await analytics.track(visit("https://site.test/"), "project_created");
+        await analytics.track(
+          visit("https://site.test/", {}, { "x-broken": "1" }),
+          "project_created",
+        );
+      } finally {
+        await db`ALTER TABLE analytics_event_away RENAME TO analytics_event`;
+      }
+      expect(await events()).toHaveLength(0);
+    });
+
     test("is off under NODE_ENV=test unless switched on", async () => {
       const analytics = createAnalytics({ db, events: EVENTS });
       await analytics.track(visit("https://site.test/"), "project_created");
@@ -443,6 +467,22 @@ describe("createAnalytics", () => {
         new_user: false,
       });
       expect(await events()).toHaveLength(1);
+    });
+
+    test("markExcluded does no lookup while analytics is disabled", async () => {
+      let lookups = 0;
+      const analytics = make({
+        enabled: false,
+        exclude: () => {
+          lookups++;
+          return false;
+        },
+      });
+      analytics.markExcluded(visit("https://site.test/auth/callback"));
+      await Bun.sleep(20);
+      expect(lookups).toBe(0);
+      const [salts] = await db`SELECT count(*)::int AS n FROM analytics_salt`;
+      expect(salts).toEqual({ n: 0 });
     });
 
     test("authenticated fills the column", async () => {

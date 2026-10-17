@@ -9,6 +9,8 @@ export interface SendOptions {
   endpoint?: string;
 }
 
+const CONTENT_TYPE = "text/plain;charset=UTF-8";
+
 export function send(
   name: string,
   props: ClientProps = {},
@@ -17,11 +19,16 @@ export function send(
   try {
     const endpoint = options.endpoint ?? "/api/events";
     const body = JSON.stringify({ name, props, path: location.pathname });
-    const blob = new Blob([body], { type: "application/json" });
-    if (navigator.sendBeacon?.(endpoint, blob)) return;
+    // text/plain keeps both requests CORS-simple; the endpoint ignores Content-Type.
+    const blob = new Blob([body], { type: CONTENT_TYPE });
+    try {
+      if (navigator.sendBeacon?.(endpoint, blob)) return;
+    } catch {
+      // A throwing or missing sendBeacon falls through to fetch.
+    }
     void fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": CONTENT_TYPE },
       body,
       keepalive: true,
     }).catch(() => {});

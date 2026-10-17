@@ -142,7 +142,10 @@ export const createEventsHandler = <N extends string>(deps: HandlerDeps<N>) => {
     try {
       await handle(req);
     } catch (err) {
-      deps.onError("Events endpoint failed", err);
+      // A throwing onError mustn't break "always 204", so its own error is dropped.
+      try {
+        deps.onError("Events endpoint failed", err);
+      } catch {}
     }
     return noContent();
   };
