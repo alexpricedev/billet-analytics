@@ -34,6 +34,7 @@
     "lint": "biome check .",
     "lint:write": "biome check . --write",
     "typecheck": "tsc --noEmit",
+    "build": "bun run typecheck",
     "check": "bun run lint && bun run typecheck"
   },
   "publishConfig": {
