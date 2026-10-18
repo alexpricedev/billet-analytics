@@ -21,6 +21,17 @@ describe("package manifest", () => {
     }
   });
 
+  test("the browser entries pull in nothing from bun", async () => {
+    // ./client and ./events are bundled into the page, so neither they nor
+    // anything they import may reach for Bun's SQL.
+    for (const file of ["src/client.ts", "src/events.ts", "src/classify.ts"]) {
+      const source = await Bun.file(join(root, file)).text();
+      expect(source).not.toInclude('from "bun"');
+      expect(source).not.toInclude("./analytics");
+      expect(source).not.toInclude("./report");
+    }
+  });
+
   test("every export target exists on disk", async () => {
     const pkg = await readJson("package.json");
     const targets: string[] = [];

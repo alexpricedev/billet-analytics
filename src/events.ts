@@ -33,6 +33,12 @@ export type PropsOf<S extends EventSpec> =
     ? { [K in keyof S["props"]]?: ValueOf<S["props"][K]> }
     : Record<string, never>;
 
+/** The names in a registry a beacon may carry: its `source: "client"` events. */
+export type ClientEventName<E extends EventRegistry> = {
+  [K in keyof E]: E[K]["source"] extends "client" ? K : never;
+}[keyof E] &
+  string;
+
 /** Recorded by `captureRequest`; a site's own registry can't redefine them. */
 export const BUILT_IN_EVENTS = {
   page_view: { source: "server" },

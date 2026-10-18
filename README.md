@@ -47,9 +47,9 @@ changing any privacy default.
 ## For AI agents
 
 - **Package**: `@alexpricedev/billet-analytics`
-- **Install**: `bun add github:alexpricedev/billet-analytics` (not on npm yet)
+- **Install**: `bun add github:alexpricedev/billet-analytics#v0.2.0` (not on npm yet — pin the tag, see [Install and add the migration](#1-install-and-add-the-migration))
 - **Runtime**: Bun ≥ 1.2, PostgreSQL. Uses Bun's `SQL`; no other dependencies.
-- **Exports**: `.` (server), `./client` (browser `send()`), `./migration` (`up`/`down`)
+- **Exports**: `.` (server), `./client` (browser `send()`, `createClient`), `./events` (`defineEvents`, browser-safe), `./migration` (`up`/`down`)
 - **Tables**: `analytics_event`, `analytics_salt`, created by the package's migration
 - **Side effects**: none at import. `createAnalytics()` only validates config; nothing is written until a request is recorded.
 - **Off in tests**: disabled when `NODE_ENV=test` unless `enabled: true` or `setEnabled(true)`
@@ -86,8 +86,10 @@ Paths below are Billet's. Adapt them where your app differs.
 ### 1. Install and add the migration
 
 ```bash
-bun add github:alexpricedev/billet-analytics
+bun add github:alexpricedev/billet-analytics#v0.2.0
 ```
+
+Pin the tag. Without `#v0.2.0` the dependency tracks `main`, so `bun install` on a fresh checkout can pull a different version than the one you tested. Releases are tagged `vX.Y.Z` ([all tags](https://github.com/alexpricedev/billet-analytics/tags)); bump the tag deliberately and read [CHANGELOG.md](CHANGELOG.md).
 
 Add one file to `src/server/database/migrations/` (name it with today's timestamp):
 
@@ -102,9 +104,10 @@ Billet runs migrations on boot, so the tables appear on the next start (and befo
 
 ```ts
 // src/server/services/analytics.ts
-import { createAnalytics, defineEvents } from "@alexpricedev/billet-analytics";
+import { createAnalytics } from "@alexpricedev/billet-analytics";
 import type { BunRequest } from "bun";
 import { clientKey } from "../middleware/client-ip";
+import { EVENTS } from "../../shared/analytics-events";
 import { db } from "./database";
 import { log } from "./logger";
 import {
@@ -112,12 +115,6 @@ import {
   getSessionIdFromRequest,
   type SessionContext,
 } from "./sessions";
-
-export const EVENTS = defineEvents({
-  signup_requested: { source: "server" },
-  magic_link_verified: { source: "server", props: { new_user: "boolean" } },
-  cta_click: { source: "client", props: { id: ["hero", "pricing"] } },
-});
 
 // Read-only lookup, once per request: getSessionContext would mint a guest
 // session, and analytics must never create one. The `fetch` fallback (404s)
@@ -135,7 +132,7 @@ const sessionFor = (req: Request): Promise<SessionContext | null> => {
 
 export const analytics = createAnalytics({
   db,
-  events: EVENTS,
+  events: EVENTS, // src/shared/analytics-events.ts — see step 5
   clientIp: clientKey,
   authenticated: async (req) => (await sessionFor(req))?.isAuthenticated ?? false,
   exclude: async (req) => (await sessionFor(req))?.user?.role === "admin",
@@ -146,6 +143,37 @@ export const analytics = createAnalytics({
 `clientKey` is Billet's rate-limit key: the socket address, or the last `X-Forwarded-For` hop when `TRUST_PROXY=true`. Pass whatever your app trusts.
 
 Without `clientIp`, the package uses the last `X-Forwarded-For` entry. That is only safe behind a proxy that appends the caller's address (Railway, Fly, most load balancers). With no proxy, a caller can send any `X-Forwarded-For` they like, which gets round the endpoint's rate limit and splits one visitor into many; with no header at all, every caller shares one budget. In either case pass a `clientIp` that reads the socket address.
+
+#### On an older Billet fork
+
+`clientKey` and `runCleanupSweep` (step 6) are recent Billet helpers. An older fork has neither. Both have a short standalone replacement.
+
+For `clientIp`, read the socket address from the server. Bun exposes it through `server.requestIP(req)`, so keep the server on the module and look it up per request:
+
+```ts
+// src/server/services/client-ip.ts
+import type { Server } from "bun";
+
+let server: Server | null = null;
+
+/** Call once, straight after Bun.serve(). */
+export const setServer = (value: Server): void => {
+  server = value;
+};
+
+export const clientKey = (req: Request): string =>
+  server?.requestIP(req)?.address ??
+  req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() ??
+  "unknown";
+```
+
+```ts
+// main.ts
+const server = Bun.serve({ /* ... */ });
+setServer(server);
+```
+
+Behind a proxy that appends the caller's address, keep using the default (drop `clientIp` entirely) — the socket address there is the proxy's, which puts every visitor in one bucket.
 
 ### 3. Capture every routed request
 
@@ -218,19 +246,54 @@ export const apiRoutes = {
 };
 ```
 
-It only accepts events registered with `source: "client"`, checks the request is same-origin (`Sec-Fetch-Site`, or `Origin` against the request and `siteUrl`), rate limits each client (60 a minute, its own budget, remembering at most 10,000 clients), caps the body at 2 KB (counted in bytes as it streams in) and always answers 204 without waiting for the write. There's no CSRF token: `sendBeacon` can't set headers, and all it can do is append an allow-listed, anonymous event.
+It only accepts events registered with `source: "client"`, reports every drop through `onDrop` (see [When a beacon vanishes](#when-a-beacon-vanishes)), checks the request is same-origin (`Sec-Fetch-Site`, or `Origin` against the request and `siteUrl`), rate limits each client (60 a minute, its own budget, remembering at most 10,000 clients), caps the body at 2 KB (counted in bytes as it streams in) and always answers 204 without waiting for the write. There's no CSRF token: `sendBeacon` can't set headers, and all it can do is append an allow-listed, anonymous event.
 
 ### 5. Send client events
 
+Move the registry into its own file so the browser can import it without pulling in the server:
+
 ```ts
-import { send } from "@alexpricedev/billet-analytics/client";
+// src/shared/analytics-events.ts
+import { defineEvents } from "@alexpricedev/billet-analytics/events";
+
+export const EVENTS = defineEvents({
+  signup_requested: { source: "server" },
+  magic_link_verified: { source: "server", props: { new_user: "boolean" } },
+  cta_click: { source: "client", props: { id: ["hero", "pricing"] } },
+});
+```
+
+`src/server/services/analytics.ts` then imports `EVENTS` from there and passes it to `createAnalytics`, and the browser gets a `send` checked against it:
+
+```ts
+import { createClient } from "@alexpricedev/billet-analytics/client";
+import type { EVENTS } from "../shared/analytics-events";
+
+const analytics = createClient<typeof EVENTS>();
 
 for (const el of document.querySelectorAll<HTMLElement>("[data-cta]")) {
-  el.addEventListener("click", () => send("cta_click", { id: el.dataset.cta ?? "" }));
+  el.addEventListener("click", () => analytics.send("cta_click", { id: el.dataset.cta ?? "" }));
 }
 ```
 
-`send(name, props, { endpoint })` posts one beacon (falling back to a keepalive `fetch`) and never throws. It stores nothing in the browser. In Billet's client tiers this is presentation-only: it changes no state the server owns.
+`createClient<typeof EVENTS>()` fails `bun run typecheck` on an unknown name, a `source: "server"` event, or a prop outside its allow-list — the mistakes the endpoint would otherwise drop in silence. `./events` imports nothing from Bun, so it is safe in a browser bundle.
+
+The untyped `send(name, props, { endpoint })` is still exported for a page with no registry to hand. Both post one beacon (falling back to a keepalive `fetch`), never throw, and store nothing in the browser. Each beacon also carries the page's path, `utm_source`/`utm_medium`/`utm_campaign` and `document.referrer`, so a click is attributed to the campaign that brought the visitor; all three are re-sanitised server-side exactly as a page view's are. In Billet's client tiers this is presentation-only: it changes no state the server owns.
+
+#### When a beacon vanishes
+
+The endpoint answers 204 for everything, so a drop is invisible to the browser by design. Outside `NODE_ENV=production` and `test` the server prints the reason instead:
+
+```
+[analytics] dropped a client event: "cta_clik" is not a registered client event
+[analytics] dropped a client event: not same-origin
+```
+
+Route them to your logger (or silence them) with `onDrop`:
+
+```ts
+onDrop: (reason) => log.warn("analytics", `Dropped a client event: ${reason}`),
+```
 
 ### 6. Purge on the housekeeping sweep
 
@@ -245,6 +308,32 @@ export const runCleanupSweep = async (): Promise<void> => {
   // ...
 };
 ```
+
+If your fork has no `runCleanupSweep`, a timer on the server module does the same job. Run it on boot and hourly; `purgeExpired` is idempotent, so a missed or doubled run costs nothing.
+
+```ts
+// src/server/services/analytics-purge.ts
+import { analytics } from "./analytics";
+import { log } from "./logger";
+
+const HOURLY = 60 * 60 * 1000;
+
+const purge = () =>
+  analytics
+    .purgeExpired()
+    .catch((err) => log.error("analytics", `Purge failed: ${String(err)}`));
+
+/** Call once on boot. */
+export const startAnalyticsPurge = (): (() => void) => {
+  void purge();
+  const timer = setInterval(purge, HOURLY);
+  // Don't hold the process open in tests or a one-off script.
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
+```
+
+In a multi-instance deploy every instance runs it, which is harmless: the deletes are the same rows. Under `NODE_ENV=test`, don't start it.
 
 ### Tests
 
@@ -292,6 +381,7 @@ The package binds every value as a primitive (props go in as text and are cast t
 | `enabled` | off under `NODE_ENV=test` | Force on or off. `setEnabled()` flips it later. |
 | `endpoint` | `{ maxRequests: 60, windowMs: 60000, maxBodyBytes: 2048 }` | Your beacons are bigger or busier |
 | `onError(message, err)` | `console.error` | Route failures to your logger |
+| `onDrop(reason, req)` | `console.warn`, off under `NODE_ENV` `production` and `test` | Route dropped client events to your logger, or pass `() => {}` to silence them |
 
 ### Events
 
@@ -320,16 +410,22 @@ await analytics.report.kpis(period, { events: ["signup_requested"] });
 await analytics.report.timeSeries(period, "day"); // or "week"
 // [{ bucket: "2026-10-01", visitors, pageViews }, ...] one per local day, empty days included
 
+await analytics.report.eventSeries(period, "cta_click", "day"); // or "week"
+// [{ bucket: "2026-10-01", count, visitors }, ...] same buckets, one event
+
 await analytics.report.breakdown(period, "referrer_host", { event: "page_view", limit: 10 });
 // [{ label, count, visitors }, ...] most visitors first
+
+await analytics.report.breakdown(period, { prop: "id" }, { event: "cta_click" });
+// [{ label: "hero", count, visitors }, ...] grouped by that event's prop
 
 await analytics.report.eventTallies(period);
 // [{ label, sources, count, visitors }, ...]
 ```
 
-`breakdown` dimensions: `route`, `referrer_host`, `device`, `browser`, `utm_source`, `utm_medium`, `utm_campaign`. Visitor hashes rotate daily, so "visitors" over a range is the sum of daily uniques, the same number Plausible-style tools report.
+`breakdown` dimensions: `route`, `referrer_host`, `device`, `browser`, `utm_source`, `utm_medium`, `utm_campaign`, or `{ prop: "<key>" }` for one of an event's own props (rows without the key are skipped; the key must be a plain identifier). Visitor hashes rotate daily, so "visitors" over a range is the sum of daily uniques, the same number Plausible-style tools report.
 
-The pure helpers are exported too: `isBot`, `isPrefetch`, `classifyUserAgent`, `normalizePath`, `notFoundBucket`, `referrerHost`, `utm`, `SAFE_STRING`, `sanitizeProps`, `startOfDay`, `localDay`.
+The pure helpers are exported too: `isBot`, `isPrefetch`, `classifyUserAgent`, `normalizePath`, `notFoundBucket`, `referrerHost`, `hostFromReferrer`, `utm`, `utmValue`, `SAFE_STRING`, `sanitizeProps`, `startOfDay`, `localDay`.
 
 ## Development
 
@@ -340,6 +436,8 @@ echo "DATABASE_URL=postgresql://localhost/billet-analytics-test" > .env.test
 bun run check   # biome + tsc
 bun test        # the database tests drop and recreate the two tables
 ```
+
+`.env.test` is not optional. The tests drop and recreate `analytics_event` and `analytics_salt`, so they refuse to start unless `DATABASE_URL` names a database ending in `-test`. Bun loads `.env.test` over `.env` under `NODE_ENV=test`, which `bun test` sets.
 
 ## License
 

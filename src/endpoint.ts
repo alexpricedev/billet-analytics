@@ -4,7 +4,9 @@ import { normalizePath } from "./classify";
 // headers, there is no session to ride, and all this can do is append an
 // allow-listed, anonymous event. Same-origin and a rate limit keep it honest.
 // It always answers 204 so it gives a scripted caller nothing to probe, and
-// answers without waiting for the write: nobody reads the reply.
+// answers without waiting for the write: nobody reads the reply. The caller
+// learns nothing from a drop, so every drop is reported through `onDrop`
+// instead, which outside production prints the reason.
 
 export interface EndpointOptions {
   /** Beacons per client per window. Default 60. */
@@ -20,6 +22,12 @@ export const DEFAULT_MAX_BODY_BYTES = 2048;
 /** The most clients the rate limiter remembers at once. */
 export const MAX_TRACKED_CLIENTS = 10_000;
 
+/** The page context a beacon reports, before any of it is trusted. */
+export interface BeaconAttribution {
+  referrer: unknown;
+  utm: unknown;
+}
+
 interface HandlerDeps<N extends string> {
   options: EndpointOptions | undefined;
   /** The site's public origin, already parsed. */
@@ -31,9 +39,16 @@ interface HandlerDeps<N extends string> {
     name: N,
     route: string | null,
     props: unknown,
+    attribution: BeaconAttribution,
   ) => Promise<void>;
   onError: (message: string, error: unknown) => void;
+  /** Why a beacon was thrown away. Never reaches the caller. */
+  onDrop: (reason: string, req: Request) => void;
 }
+
+/** A name from an untrusted body, short and quoted, for a drop reason. */
+const describeName = (name: unknown): string =>
+  typeof name === "string" ? JSON.stringify(name.slice(0, 60)) : typeof name;
 
 const noContent = () => new Response(null, { status: 204 });
 
@@ -113,34 +128,50 @@ export const createEventsHandler = <N extends string>(deps: HandlerDeps<N>) => {
     return origin === new URL(req.url).origin || origin === deps.siteOrigin;
   };
 
-  const handle = async (req: Request): Promise<void> => {
-    if (req.method !== "POST") return;
-    if (!sameOrigin(req)) return;
-    if (limited(deps.clientIp(req))) return;
-    if (Number(req.headers.get("content-length")) > maxBodyBytes) return;
+  // Returns the reason the beacon was dropped, or null when it was recorded.
+  const handle = async (req: Request): Promise<string | null> => {
+    if (req.method !== "POST") return `method ${req.method}, not POST`;
+    if (!sameOrigin(req)) return "not same-origin";
+    if (limited(deps.clientIp(req))) return "rate limited";
+    if (Number(req.headers.get("content-length")) > maxBodyBytes) {
+      return `body over ${maxBodyBytes} bytes`;
+    }
 
-    let body: { name?: unknown; props?: unknown; path?: unknown };
+    let body: {
+      name?: unknown;
+      props?: unknown;
+      path?: unknown;
+      referrer?: unknown;
+      utm?: unknown;
+    };
     try {
       const text = await readCapped(req, maxBodyBytes);
-      if (text === null) return;
+      if (text === null) return `body over ${maxBodyBytes} bytes`;
       body = JSON.parse(text) as typeof body;
     } catch {
-      return;
+      return "body is not JSON";
     }
-    if (typeof body !== "object" || body === null) return;
-    if (!deps.accepts(body.name)) return;
+    if (typeof body !== "object" || body === null) {
+      return "body is not an object";
+    }
+    if (!deps.accepts(body.name)) {
+      return `${describeName(body.name)} is not a registered client event`;
+    }
 
     void deps.record(
       req,
       body.name,
       typeof body.path === "string" ? normalizePath(body.path) : null,
       body.props,
+      { referrer: body.referrer, utm: body.utm },
     );
+    return null;
   };
 
   return async (req: Request): Promise<Response> => {
     try {
-      await handle(req);
+      const reason = await handle(req);
+      if (reason !== null) deps.onDrop(reason, req);
     } catch (err) {
       // A throwing onError mustn't break "always 204", so its own error is dropped.
       try {

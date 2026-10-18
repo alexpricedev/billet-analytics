@@ -3,14 +3,17 @@ import type { SQL } from "bun";
 import {
   classifyUserAgent,
   forwardedClientIp,
+  hostFromReferrer,
   isBot,
   isPrefetch,
   normalizePath,
   notFoundBucket,
   referrerHost,
   utm,
+  utmValue,
 } from "./classify";
 import {
+  type BeaconAttribution,
   createEventsHandler,
   type EndpointOptions,
   parseSiteOrigin,
@@ -74,6 +77,14 @@ export interface AnalyticsConfig<E extends EventRegistry = EventRegistry> {
   endpoint?: EndpointOptions;
   /** Where failures are reported. Analytics never throws into a request. Default: console.error. */
   onError?: (message: string, error: unknown) => void;
+  /**
+   * Why a client event was thrown away: a beacon the endpoint refused, or one
+   * that reached `recordEvent` and was dropped there. The endpoint answers 204
+   * either way, so without this a wiring mistake is invisible. Default:
+   * `console.warn`, except under `NODE_ENV` `production` or `test`. Pass
+   * `() => {}` to silence it.
+   */
+  onDrop?: (reason: string, req: Request) => void;
 }
 
 /** Machine endpoints and static files are not visits. */
@@ -114,6 +125,16 @@ export interface RecordInput<N extends string = string> {
   status?: number | null;
   /** Untrusted until sanitizeProps checks it against the event's allow-list. */
   props?: unknown;
+  /**
+   * Replaces the request's own attribution. A beacon's URL carries no campaign
+   * and its referrer is the page itself, so a client event reports the page's.
+   */
+  attribution?: Partial<
+    Pick<
+      RequestContext,
+      "referrerHost" | "utmSource" | "utmMedium" | "utmCampaign"
+    >
+  >;
 }
 
 export const visitorHash = (
@@ -159,6 +180,12 @@ const defaultOnError = (message: string, error: unknown): void => {
   console.error(`[analytics] ${message}: ${String(error)}`);
 };
 
+const defaultOnDrop = (reason: string): void => {
+  console.warn(`[analytics] dropped a client event: ${reason}`);
+};
+
+const noop = (): void => {};
+
 export const createAnalytics = <
   const E extends EventRegistry = Record<never, never>,
 >(
@@ -191,6 +218,17 @@ export const createAnalytics = <
       reportError(message, error);
     } catch {}
   };
+  // Loud in development, where a silent 204 is the thing that wastes an hour;
+  // quiet in production (a scanner would fill the log) and in tests.
+  const env = process.env.NODE_ENV;
+  const reportDrop =
+    config.onDrop ??
+    (env === "production" || env === "test" ? noop : defaultOnDrop);
+  const onDrop = (reason: string, req: Request): void => {
+    try {
+      reportDrop(reason, req);
+    } catch {}
+  };
   let enabled = config.enabled ?? process.env.NODE_ENV !== "test";
 
   const isEventName = (name: unknown): name is Name =>
@@ -212,7 +250,10 @@ export const createAnalytics = <
       ON CONFLICT (day) DO NOTHING
     `;
     const [row] = await db`SELECT salt FROM analytics_salt WHERE day = ${day}`;
-    const salt = (row as { salt: string }).salt;
+    // The row can be gone again between the two statements (a purge at
+    // midnight, a test resetting the schema). Fall back to the salt we just
+    // offered rather than throwing the event away.
+    const salt = (row as { salt: string } | undefined)?.salt ?? candidate;
     saltCache = { day, salt };
     return salt;
   };
@@ -286,6 +327,7 @@ export const createAnalytics = <
     const props = JSON.stringify(
       sanitizeProps(registry, input.name, input.props ?? {}),
     );
+    const attributed = { ...ctx, ...input.attribution };
     await db`
       INSERT INTO analytics_event (
         occurred_at, name, source, visitor_hash, route, method, status, authenticated,
@@ -293,10 +335,17 @@ export const createAnalytics = <
       ) VALUES (
         ${roundTimestamp(rounding, timeZone).toISOString()}, ${input.name}, ${input.source}, ${ctx.visitorHash},
         ${input.route ?? null}, ${input.method ?? null}, ${input.status ?? null}, ${ctx.authenticated},
-        ${ctx.referrerHost}, ${ctx.utmSource}, ${ctx.utmMedium}, ${ctx.utmCampaign},
+        ${attributed.referrerHost}, ${attributed.utmSource}, ${attributed.utmMedium}, ${attributed.utmCampaign},
         ${ctx.device}, ${ctx.browser}, ${props}::text::jsonb
       )
     `;
+  };
+
+  // Only client events report their drops: a bot hitting a page would
+  // otherwise log on every request, and a beacon that vanishes is the one a
+  // developer can't explain.
+  const dropped = (input: RecordInput, req: Request, reason: string): void => {
+    if (input.source === "client") onDrop(reason, req);
   };
 
   /** Best-effort: never throws into a request. Unknown event names are dropped. */
@@ -304,10 +353,16 @@ export const createAnalytics = <
     req: Request,
     input: RecordInput,
   ): Promise<void> => {
-    if (!enabled || !isEventName(input.name)) return;
+    if (!enabled) return dropped(input, req, "analytics is disabled");
+    if (!isEventName(input.name)) {
+      return dropped(input, req, `"${input.name}" is not a registered event`);
+    }
     try {
       const ctx = await requestContext(req);
-      if (!ctx || ctx.excluded) return;
+      if (!ctx) {
+        return dropped(input, req, "the request looks like a bot or prefetch");
+      }
+      if (ctx.excluded) return dropped(input, req, "excluded by exclude()");
       await insertEvent(ctx, input);
     } catch (err) {
       onError(`Failed to record ${input.name}`, err);
@@ -405,14 +460,37 @@ export const createAnalytics = <
     await db`DELETE FROM analytics_salt WHERE day < ${localDay(timeZone, now)}`;
   };
 
+  // A beacon reaches the server from /api/events, so its URL has no campaign
+  // and its Referer is the page it fired on. The page's own attribution comes
+  // in the body and is sanitised here exactly as a request's would be.
+  const beaconAttribution = (req: Request, beacon: BeaconAttribution) => {
+    const utmSent =
+      typeof beacon.utm === "object" && beacon.utm !== null
+        ? (beacon.utm as Record<string, unknown>)
+        : {};
+    return {
+      referrerHost: hostFromReferrer(beacon.referrer, req, siteUrl),
+      utmSource: utmValue(utmSent.utm_source),
+      utmMedium: utmValue(utmSent.utm_medium),
+      utmCampaign: utmValue(utmSent.utm_campaign),
+    };
+  };
+
   const handleEvents = createEventsHandler({
     options: config.endpoint,
     siteOrigin,
     clientIp,
     onError,
+    onDrop,
     accepts: (name): name is Name => isEventName(name) && isClientEvent(name),
-    record: (req, name, route, props) =>
-      recordEvent(req, { name, source: "client", route, props }),
+    record: (req, name, route, props, beacon) =>
+      recordEvent(req, {
+        name,
+        source: "client",
+        route,
+        props,
+        attribution: beaconAttribution(req, beacon),
+      }),
   });
 
   return {

@@ -356,3 +356,199 @@ describe("events endpoint", () => {
     expect(await waitForRows(rows, 0)).toHaveLength(0);
   });
 });
+
+describe("beacon attribution", () => {
+  beforeAll(resetSchema);
+  beforeEach(truncate);
+
+  const attribution = async () =>
+    [
+      ...(await db`SELECT referrer_host, utm_source, utm_medium, utm_campaign
+                   FROM analytics_event ORDER BY id`),
+    ] as {
+      referrer_host: string | null;
+      utm_source: string | null;
+      utm_medium: string | null;
+      utm_campaign: string | null;
+    }[];
+
+  test("takes the page's referrer and campaign from the body", async () => {
+    await make().handleEvents(
+      beacon({
+        name: "report_printed",
+        path: "/pricing",
+        referrer: "https://www.news.example/story",
+        utm: {
+          utm_source: " Newsletter ",
+          utm_medium: "email",
+          utm_campaign: "launch",
+        },
+      }),
+    );
+    expect(await waitForRows(attribution, 1)).toEqual([
+      {
+        referrer_host: "news.example",
+        utm_source: "newsletter",
+        utm_medium: "email",
+        utm_campaign: "launch",
+      },
+    ]);
+  });
+
+  test("drops an internal referrer and an unsafe campaign value", async () => {
+    await make().handleEvents(
+      beacon({
+        name: "report_printed",
+        referrer: "https://site.test/pricing",
+        utm: { utm_source: "alex@example.com", utm_medium: 7 },
+      }),
+    );
+    expect(await waitForRows(attribution, 1)).toEqual([
+      {
+        referrer_host: null,
+        utm_source: null,
+        utm_medium: null,
+        utm_campaign: null,
+      },
+    ]);
+  });
+
+  test("a beacon without attribution records none", async () => {
+    await make().handleEvents(
+      beacon({ name: "report_printed", utm: "not an object" }),
+    );
+    expect(await waitForRows(attribution, 1)).toEqual([
+      {
+        referrer_host: null,
+        utm_source: null,
+        utm_medium: null,
+        utm_campaign: null,
+      },
+    ]);
+  });
+
+  test("a server event still uses the request's own attribution", async () => {
+    const analytics = make();
+    const req = new Request("https://site.test/pricing?utm_source=ads", {
+      headers: { "user-agent": CHROME, referer: "https://www.news.example/" },
+    });
+    await analytics.track(req, "project_created");
+    expect(await attribution()).toEqual([
+      {
+        referrer_host: "news.example",
+        utm_source: "ads",
+        utm_medium: null,
+        utm_campaign: null,
+      },
+    ]);
+  });
+});
+
+describe("drop reasons", () => {
+  beforeAll(resetSchema);
+  beforeEach(truncate);
+
+  const withDrops = (
+    overrides: Partial<AnalyticsConfig<typeof EVENTS>> = {},
+  ) => {
+    const drops: string[] = [];
+    const analytics = make({
+      onDrop: (reason) => drops.push(reason),
+      ...overrides,
+    });
+    return { analytics, drops };
+  };
+
+  test("a recorded beacon reports no drop", async () => {
+    const { analytics, drops } = withDrops();
+    await analytics.handleEvents(beacon({ name: "report_printed" }));
+    await waitForRows(rows, 1);
+    expect(drops).toEqual([]);
+  });
+
+  test("names an unregistered event", async () => {
+    const { analytics, drops } = withDrops();
+    await analytics.handleEvents(beacon({ name: "report_pirnted" }));
+    expect(drops).toEqual([
+      '"report_pirnted" is not a registered client event',
+    ]);
+  });
+
+  test("names a server-only event sent from the browser", async () => {
+    const { analytics, drops } = withDrops();
+    await analytics.handleEvents(beacon({ name: "project_created" }));
+    expect(drops).toEqual([
+      '"project_created" is not a registered client event',
+    ]);
+  });
+
+  test("reports a cross-origin beacon", async () => {
+    const { analytics, drops } = withDrops();
+    const req = beacon(
+      { name: "report_printed" },
+      { "sec-fetch-site": "cross-site" },
+    );
+    await analytics.handleEvents(req);
+    expect(drops).toEqual(["not same-origin"]);
+  });
+
+  test("reports the wrong method, a bad body and the rate limit", async () => {
+    const { analytics, drops } = withDrops({
+      // The limiter runs before the body is read, so the unparseable beacon
+      // spends a slot too.
+      endpoint: { maxRequests: 2, windowMs: 60_000 },
+    });
+    const get = new Request("https://site.test/api/events", {
+      headers: { "sec-fetch-site": "same-origin" },
+    });
+    await analytics.handleEvents(get);
+    await analytics.handleEvents(beacon("{ not json"));
+    await analytics.handleEvents(beacon({ name: "report_printed" }));
+    await analytics.handleEvents(beacon({ name: "report_printed" }));
+    expect(drops).toEqual([
+      "method GET, not POST",
+      "body is not JSON",
+      "rate limited",
+    ]);
+  });
+
+  test("reports a body over the cap", async () => {
+    const { analytics, drops } = withDrops();
+    await analytics.handleEvents(
+      beacon({ name: "report_printed", props: { pad: "x".repeat(4000) } }),
+    );
+    expect(drops).toEqual([`body over ${DEFAULT_MAX_BODY_BYTES} bytes`]);
+  });
+
+  test("reports a beacon dropped after the endpoint accepted it", async () => {
+    const { analytics, drops } = withDrops({ exclude: () => true });
+    await analytics.handleEvents(beacon({ name: "report_printed" }));
+    await Bun.sleep(50);
+    expect(drops).toEqual(["excluded by exclude()"]);
+    expect(await rows()).toHaveLength(0);
+  });
+
+  test("reports a bot's beacon, but not a bot's page view", async () => {
+    const { analytics, drops } = withDrops();
+    const bot = beacon({ name: "report_printed" }, { "user-agent": "curl/8" });
+    await analytics.handleEvents(bot);
+    await Bun.sleep(50);
+    expect(drops).toEqual(["the request looks like a bot or prefetch"]);
+
+    const crawl = new Request("https://site.test/", {
+      headers: { "user-agent": "curl/8" },
+    });
+    await analytics.track(crawl, "project_created");
+    expect(drops).toHaveLength(1);
+  });
+
+  test("a throwing onDrop still answers 204", async () => {
+    const analytics = make({
+      onDrop: () => {
+        throw new Error("logger down");
+      },
+    });
+    const res = await analytics.handleEvents(beacon({ name: "nope" }));
+    expect(res.status).toBe(204);
+  });
+});

@@ -70,13 +70,17 @@ export const notFoundBucket = (path: string): string => {
   return rest.length > 0 ? `/${first}/*` : `/${first}`;
 };
 
-/** The referring host, or null for none, a malformed one, or the site itself. */
-export const referrerHost = (
+/**
+ * The host a referrer points at, or null for none, a malformed one, or the
+ * site itself. Takes the value rather than the request, so a client event can
+ * report the page's referrer instead of the beacon's.
+ */
+export const hostFromReferrer = (
+  referer: unknown,
   req: Request,
   siteUrl: string | undefined = process.env.APP_URL,
 ): string | null => {
-  const referer = req.headers.get("referer");
-  if (!referer) return null;
+  if (typeof referer !== "string" || !referer) return null;
   try {
     const host = new URL(referer).hostname.toLowerCase();
     const own = new URL(req.url).hostname.toLowerCase();
@@ -87,10 +91,21 @@ export const referrerHost = (
   }
 };
 
-export const utm = (url: URL, key: string): string | null => {
-  const value = url.searchParams.get(key)?.trim().toLowerCase();
-  return value && SAFE_STRING.test(value) ? value : null;
+/** The referring host of this request, from its `Referer` header. */
+export const referrerHost = (
+  req: Request,
+  siteUrl: string | undefined = process.env.APP_URL,
+): string | null => hostFromReferrer(req.headers.get("referer"), req, siteUrl);
+
+/** One UTM value, trimmed and lowercased, or null unless it passes SAFE_STRING. */
+export const utmValue = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed && SAFE_STRING.test(trimmed) ? trimmed : null;
 };
+
+export const utm = (url: URL, key: string): string | null =>
+  utmValue(url.searchParams.get(key));
 
 // A proxy such as Railway's appends the caller's address to X-Forwarded-For,
 // so the last entry is the only one a caller can't forge. Without a proxy
