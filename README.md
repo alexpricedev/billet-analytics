@@ -2,7 +2,7 @@
 
 First-party, cookie-free, anonymous-by-default analytics for Billet apps. Bun + Postgres, no third party, nothing stored on the device. It records page views, form submits, 404s, 500s and the domain events you name, into two tables your app owns. There's no dashboard: you query the data with a few read helpers and build your own report.
 
-Extracted from EcoForge's analytics. Its defaults are EcoForge's, and every one can be changed through config.
+Every default can be changed through config.
 
 ## Copy this to your coding agent
 
@@ -12,8 +12,7 @@ Paste this into your agent (Claude Code, Cursor, etc.):
 Install and wire up @alexpricedev/billet-analytics in this Billet app.
 
 1. Read the package README first:
-   node_modules/@alexpricedev/billet-analytics/README.md
-   (or https://github.com/alexpricedev/billet-analytics#readme).
+   https://github.com/alexpricedev/billet-analytics#readme.
    Follow its "Wire up a Billet app" section, steps 1 to 6. Adapt the
    snippets to this repo's file names and signatures where they differ;
    don't paste blindly.
@@ -274,7 +273,7 @@ The package binds every value as a primitive (props go in as text and are cast t
 
 ## Config
 
-`createAnalytics(config)` takes the app's Bun `SQL` instance and these options. Each default is EcoForge's behaviour.
+`createAnalytics(config)` takes the app's Bun `SQL` instance and these options. Every default can be changed through config.
 
 | Option | Default | Change when |
 |---|---|---|

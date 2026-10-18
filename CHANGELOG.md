@@ -4,7 +4,7 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [0.1.0]
 
-- Initial release, extracted from EcoForge's first-party analytics: `createAnalytics`
+- Initial release: `createAnalytics`
   with a typed event registry (`defineEvents`), automatic request capture, `track`,
   the `/api/events` beacon handler, the client `send()` helper, the `analytics_event`
   and `analytics_salt` migration, retention purge, and a small read side (KPIs, daily
