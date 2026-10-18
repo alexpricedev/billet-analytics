@@ -167,6 +167,50 @@ describe("report", () => {
     expect(await report.eventTallies(empty)).toEqual([]);
   });
 
+  test("eventSeries counts one event per bucket, empty days included", async () => {
+    expect(await report.eventSeries(period, "cta_click")).toEqual([
+      { bucket: "2026-10-06", count: 0, visitors: 0 },
+      { bucket: "2026-10-07", count: 2, visitors: 1 },
+    ]);
+  });
+
+  test("eventSeries buckets by week too", async () => {
+    const series = await report.eventSeries(period, "page_view", "week");
+    expect(series).toEqual([{ bucket: "2026-10-05", count: 4, visitors: 3 }]);
+  });
+
+  test("breakdown groups by a prop key", async () => {
+    await db`INSERT INTO analytics_event
+      (occurred_at, name, source, visitor_hash, route, device, browser, props)
+    VALUES
+      ('2026-10-07T09:00:00Z', 'cta_click', 'client', 'd', '/', 'desktop', 'Chrome', '{"id":"pricing"}'),
+      ('2026-10-07T09:00:00Z', 'cta_click', 'client', 'e', '/', 'desktop', 'Chrome', '{"id":"pricing"}')`;
+    expect(
+      await report.breakdown(period, { prop: "id" }, { event: "cta_click" }),
+    ).toEqual([
+      { label: "pricing", count: 2, visitors: 2 },
+      { label: "hero", count: 1, visitors: 1 },
+    ]);
+  });
+
+  test("a prop breakdown skips rows without the key and honours limit", async () => {
+    const rows = await report.breakdown(
+      period,
+      { prop: "id" },
+      { event: "cta_click", limit: 1 },
+    );
+    // The server-side cta_click has no props at all.
+    expect(rows).toEqual([{ label: "hero", count: 1, visitors: 1 }]);
+  });
+
+  test("a prop breakdown rejects a key that isn't a plain identifier", async () => {
+    await expect(
+      report.breakdown(period, {
+        prop: "id'); DROP TABLE analytics_event; --",
+      }),
+    ).rejects.toThrow(/unusable prop key/);
+  });
+
   test("startOfDay gives a period of whole local days", async () => {
     const now = new Date("2026-10-07T12:00:00Z");
     const from = analytics.startOfDay(now, 1);

@@ -38,6 +38,22 @@ export interface EventTally extends Tally {
   sources: string;
 }
 
+export interface EventSeriesPoint {
+  /** The local date the bucket starts on, YYYY-MM-DD. */
+  bucket: string;
+  count: number;
+  visitors: number;
+}
+
+/** Group by one of an event's props instead of a column, e.g. `{ prop: "id" }`. */
+export interface PropDimension {
+  prop: string;
+}
+
+// Props are free-form keys, so the key is checked before it is used, even
+// though it is bound as a parameter rather than spliced into the SQL.
+const PROP_KEY = /^[a-z0-9_]{1,40}$/i;
+
 export const DIMENSIONS = [
   "route",
   "referrer_host",
@@ -130,11 +146,68 @@ export const createReport = (db: SQL, timeZone: string) => {
     }));
   };
 
-  const breakdown = async (
+  // Buckets as above, but one event's count and uniques rather than visits.
+  const eventSeries = async (
     { from, to }: Period,
-    dimension: Dimension,
+    name: string,
+    unit: "day" | "week" = "day",
+  ): Promise<EventSeriesPoint[]> => {
+    const rows = await db`
+      WITH buckets AS (
+        SELECT generate_series(
+          date_trunc(${unit}, ${iso(from)}::timestamptz AT TIME ZONE ${timeZone}),
+          date_trunc(${unit}, (${iso(to)}::timestamptz - interval '1 microsecond') AT TIME ZONE ${timeZone}),
+          ('1 ' || ${unit})::interval
+        ) AS bucket
+      ),
+      counts AS (
+        SELECT
+          date_trunc(${unit}, occurred_at AT TIME ZONE ${timeZone}) AS bucket,
+          count(*)::int AS count,
+          count(DISTINCT visitor_hash)::int AS visitors
+        FROM analytics_event
+        WHERE name = ${name}
+          AND occurred_at >= ${iso(from)} AND occurred_at < ${iso(to)}
+        GROUP BY 1
+      )
+      SELECT to_char(b.bucket, 'YYYY-MM-DD') AS bucket,
+             coalesce(c.count, 0)::int AS count,
+             coalesce(c.visitors, 0)::int AS visitors
+      FROM buckets b LEFT JOIN counts c USING (bucket)
+      ORDER BY b.bucket
+    `;
+    return [...rows] as EventSeriesPoint[];
+  };
+
+  const propBreakdown = async (
+    { from, to }: Period,
+    key: string,
     options: { event?: string; limit?: number } = {},
   ): Promise<Tally[]> => {
+    if (!PROP_KEY.test(key)) {
+      throw new Error(`billet-analytics: unusable prop key "${key}"`);
+    }
+    const rows = await db`
+      SELECT props->>${key} AS label, count(*)::int AS count,
+             count(DISTINCT visitor_hash)::int AS visitors
+      FROM analytics_event
+      WHERE name = ${options.event ?? "page_view"} AND props->>${key} IS NOT NULL
+        AND occurred_at >= ${iso(from)} AND occurred_at < ${iso(to)}
+      GROUP BY 1 ORDER BY visitors DESC, count DESC, label
+      LIMIT ${options.limit ?? 10}
+    `;
+    return [...rows] as Tally[];
+  };
+
+  const breakdown = async (
+    period: Period,
+    dimension: Dimension | PropDimension,
+    options: { event?: string; limit?: number } = {},
+  ): Promise<Tally[]> => {
+    if (typeof dimension === "object") {
+      return propBreakdown(period, dimension.prop, options);
+    }
+    const { from, to } = period;
     // The column comes from a closed list, never from input.
     if (!DIMENSIONS.includes(dimension)) {
       throw new Error(`billet-analytics: unknown dimension "${dimension}"`);
@@ -165,5 +238,5 @@ export const createReport = (db: SQL, timeZone: string) => {
     return [...rows] as EventTally[];
   };
 
-  return { kpis, timeSeries, breakdown, eventTallies };
+  return { kpis, timeSeries, eventSeries, breakdown, eventTallies };
 };

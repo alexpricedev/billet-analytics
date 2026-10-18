@@ -11,6 +11,7 @@ export {
 export {
   classifyUserAgent,
   forwardedClientIp,
+  hostFromReferrer,
   isBot,
   isPrefetch,
   normalizePath,
@@ -18,14 +19,17 @@ export {
   referrerHost,
   SAFE_STRING,
   utm,
+  utmValue,
 } from "./classify";
 export {
+  type BeaconAttribution,
   DEFAULT_MAX_BODY_BYTES,
   type EndpointOptions,
   MAX_TRACKED_CLIENTS,
 } from "./endpoint";
 export {
   BUILT_IN_EVENTS,
+  type ClientEventName,
   defineEvents,
   type EventProps,
   type EventRegistry,
@@ -37,9 +41,11 @@ export {
 export {
   DIMENSIONS,
   type Dimension,
+  type EventSeriesPoint,
   type EventTally,
   type Kpis,
   type Period,
+  type PropDimension,
   type SeriesPoint,
   type Tally,
 } from "./report";

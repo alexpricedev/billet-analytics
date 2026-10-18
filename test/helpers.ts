@@ -1,11 +1,30 @@
 import { SQL } from "bun";
 import { down, up } from "../src/migration";
 
-if (!process.env.DATABASE_URL) {
+// resetSchema drops and recreates both tables, so the tests refuse to run
+// against anything but a throwaway database. Put the URL in .env.test (which
+// Bun loads over .env under NODE_ENV=test), not .env.
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
   throw new Error("DATABASE_URL is required for the database tests");
 }
 
-export const db = new SQL(process.env.DATABASE_URL, { max: 3 });
+const databaseName = (url: string): string => {
+  try {
+    return decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
+  } catch {
+    return "";
+  }
+};
+
+const name = databaseName(databaseUrl);
+if (!name.endsWith("-test")) {
+  throw new Error(
+    `billet-analytics tests drop and recreate their tables, so they refuse to run against "${name || databaseUrl}". Point DATABASE_URL at a database whose name ends in "-test" (see .env.test in the README's Development section).`,
+  );
+}
+
+export const db = new SQL(databaseUrl, { max: 3 });
 
 /** Drop and recreate the package's tables. */
 export const resetSchema = async (): Promise<void> => {
