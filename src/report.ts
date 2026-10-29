@@ -1,4 +1,5 @@
 import type { SQL } from "bun";
+import { humanizeEventName } from "./events";
 
 // The read side: a few plain queries a site can build its own report on. No
 // rendering. Visitor hashes rotate daily, so "visitors" over a range is the
@@ -34,6 +35,10 @@ export interface Tally {
 }
 
 export interface EventTally extends Tally {
+  /** The event's name as it is stored, e.g. "signup_requested". */
+  name: string;
+  /** The event's display name, e.g. "Signup requested". */
+  label: string;
   /** Every source the event arrived from, e.g. "server" or "client, server". */
   sources: string;
 }
@@ -68,7 +73,18 @@ export type Dimension = (typeof DIMENSIONS)[number];
 
 const iso = (date: Date): string => date.toISOString();
 
-export const createReport = (db: SQL, timeZone: string) => {
+export const createReport = (
+  db: SQL,
+  timeZone: string,
+  /**
+   * Event name → display name, from `createLexicon`. A name that has since
+   * left the registry still resolves, by being humanised.
+   */
+  lexicon: Readonly<Record<string, string>> = {},
+) => {
+  const labelFor = (name: string): string =>
+    lexicon[name] ?? humanizeEventName(name);
+
   const kpis = async (
     { from, to }: Period,
     options: { events?: readonly string[] } = {},
@@ -227,7 +243,7 @@ export const createReport = (db: SQL, timeZone: string) => {
 
   const eventTallies = async ({ from, to }: Period): Promise<EventTally[]> => {
     const rows = await db`
-      SELECT name AS label,
+      SELECT name,
              string_agg(DISTINCT source, ', ' ORDER BY source) AS sources,
              count(*)::int AS count,
              count(DISTINCT visitor_hash)::int AS visitors
@@ -235,7 +251,10 @@ export const createReport = (db: SQL, timeZone: string) => {
       WHERE occurred_at >= ${iso(from)} AND occurred_at < ${iso(to)}
       GROUP BY name ORDER BY count DESC, name
     `;
-    return [...rows] as EventTally[];
+    return (rows as Omit<EventTally, "label">[]).map((row) => ({
+      ...row,
+      label: labelFor(row.name),
+    }));
   };
 
   return { kpis, timeSeries, eventSeries, breakdown, eventTallies };

@@ -1,6 +1,6 @@
 {
   "name": "@alexpricedev/billet-analytics",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "First-party, cookie-free, anonymous-by-default server-side analytics for Billet apps. Bun + Postgres.",
   "type": "module",
   "module": "src/index.ts",
