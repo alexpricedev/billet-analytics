@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   BUILT_IN_EVENTS,
+  createLexicon,
   defineEvents,
+  humanizeEventName,
   mergeRegistry,
   sanitizeProps,
 } from "../src/events";
@@ -10,6 +12,7 @@ const EVENTS = mergeRegistry(
   defineEvents({
     interest_registered: {
       source: "server",
+      label: "Interest registered",
       props: { depth: ["simple", "advanced"] },
     },
     cta_click: { source: "client", props: { id: ["hero", "pricing"] } },
@@ -94,5 +97,26 @@ describe("events", () => {
     expect(() =>
       mergeRegistry({ page_view: { source: "client" } } as const),
     ).toThrow(/built-in/);
+  });
+
+  test("humanizeEventName turns an identifier into a sentence", () => {
+    expect(humanizeEventName("signup_requested")).toBe("Signup requested");
+    expect(humanizeEventName("cta-click")).toBe("Cta click");
+    expect(humanizeEventName("upload")).toBe("Upload");
+    expect(humanizeEventName("")).toBe("");
+  });
+
+  test("the lexicon prefers a label and humanises the rest", () => {
+    const lexicon = createLexicon(EVENTS);
+    expect(lexicon).toMatchObject({
+      page_view: "Page view",
+      form_submit: "Form submit",
+      not_found: "Not found",
+      server_error: "Server error",
+      interest_registered: "Interest registered",
+      cta_click: "Cta click",
+      magic_link_verified: "Magic link verified",
+    });
+    expect(Object.isFrozen(lexicon)).toBe(true);
   });
 });

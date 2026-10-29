@@ -259,7 +259,7 @@ import { defineEvents } from "@alexpricedev/billet-analytics/events";
 export const EVENTS = defineEvents({
   signup_requested: { source: "server" },
   magic_link_verified: { source: "server", props: { new_user: "boolean" } },
-  cta_click: { source: "client", props: { id: ["hero", "pricing"] } },
+  cta_click: { source: "client", label: "CTA click", props: { id: ["hero", "pricing"] } },
 });
 ```
 
@@ -387,12 +387,23 @@ The package binds every value as a primitive (props go in as text and are cast t
 
 ```ts
 export const EVENTS = defineEvents({
-  project_created: { source: "server", props: { kind: ["solar", "wind"], count: "number" } },
+  project_created: {
+    source: "server",
+    label: "Project created", // what a report shows
+    props: { kind: ["solar", "wind"], count: "number" },
+  },
   report_printed: { source: "client" },
 });
 ```
 
 A prop is `"string"` (must pass `SAFE_STRING`), `"number"` (finite), `"boolean"`, or a list of allowed strings. Anything else, and any key not listed, is dropped before it's written. `source: "client"` events may arrive through the endpoint; `"server"` ones never do. The built-in `page_view`, `form_submit` (`outcome`, `target`), `not_found` and `server_error` can't be redefined.
+
+`label` is presentation only. The name stays the identifier a beacon sends and the column stores, so changing a label needs no migration and never touches stored rows. Leave it out and the name is humanised (`signup_requested` → "Signup requested"); set it when that split would read wrong (`cta_click` → "CTA click"). `analytics.lexicon` is the whole mapping, built-ins included, for a report to name an event without a query:
+
+```ts
+analytics.lexicon.page_view; // "Page view"
+analytics.lexicon.signup_requested; // "Signup requested"
+```
 
 `captureRequest` turns a finished request into at most one event: a `page_view` for a routed `GET` answering 200 HTML, a `form_submit` for a routed `POST` (outcome `ok`, `redirect`, `error` or `rate_limited`, and the redirect target as a pattern, or only its host when it leaves the site), `not_found` for a 404 and `server_error` for a 5xx.
 
@@ -420,12 +431,12 @@ await analytics.report.breakdown(period, { prop: "id" }, { event: "cta_click" })
 // [{ label: "hero", count, visitors }, ...] grouped by that event's prop
 
 await analytics.report.eventTallies(period);
-// [{ label, sources, count, visitors }, ...]
+// [{ name, label, sources, count, visitors }, ...]
 ```
 
-`breakdown` dimensions: `route`, `referrer_host`, `device`, `browser`, `utm_source`, `utm_medium`, `utm_campaign`, or `{ prop: "<key>" }` for one of an event's own props (rows without the key are skipped; the key must be a plain identifier). Visitor hashes rotate daily, so "visitors" over a range is the sum of daily uniques, the same number Plausible-style tools report.
+`breakdown` dimensions: `route`, `referrer_host`, `device`, `browser`, `utm_source`, `utm_medium`, `utm_campaign`, or `{ prop: "<key>" }` for one of an event's own props (rows without the key are skipped; the key must be a plain identifier). Visitor hashes rotate daily, so "visitors" over a range is the sum of daily uniques, the same number Plausible-style tools report. `eventTallies` returns both the stored `name` and its display `label`; a name that has since left the registry is humanised rather than shown raw.
 
-The pure helpers are exported too: `isBot`, `isPrefetch`, `classifyUserAgent`, `normalizePath`, `notFoundBucket`, `referrerHost`, `hostFromReferrer`, `utm`, `utmValue`, `SAFE_STRING`, `sanitizeProps`, `startOfDay`, `localDay`.
+The pure helpers are exported too: `isBot`, `isPrefetch`, `classifyUserAgent`, `normalizePath`, `notFoundBucket`, `referrerHost`, `hostFromReferrer`, `utm`, `utmValue`, `SAFE_STRING`, `sanitizeProps`, `humanizeEventName`, `createLexicon`, `startOfDay`, `localDay`.
 
 ## Development
 

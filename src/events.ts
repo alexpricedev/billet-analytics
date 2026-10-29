@@ -9,6 +9,13 @@ export type PropSpec = "string" | "number" | "boolean" | readonly string[];
 export interface EventSpec {
   /** "client" events may arrive through the events endpoint; "server" ones never do. */
   source: "server" | "client";
+  /**
+   * The human-readable name a report shows, e.g. "Signup requested". The name
+   * stays the key the beacon sends and the column stores; only the read side
+   * uses the label. Default: the name, humanised (`signup_requested` →
+   * "Signup requested").
+   */
+  label?: string;
   props?: Readonly<Record<string, PropSpec>>;
 }
 
@@ -41,16 +48,17 @@ export type ClientEventName<E extends EventRegistry> = {
 
 /** Recorded by `captureRequest`; a site's own registry can't redefine them. */
 export const BUILT_IN_EVENTS = {
-  page_view: { source: "server" },
+  page_view: { source: "server", label: "Page view" },
   form_submit: {
     source: "server",
+    label: "Form submit",
     props: {
       outcome: ["ok", "redirect", "error", "rate_limited"],
       target: "string",
     },
   },
-  not_found: { source: "server" },
-  server_error: { source: "server" },
+  not_found: { source: "server", label: "Not found" },
+  server_error: { source: "server", label: "Server error" },
 } as const satisfies EventRegistry;
 
 export type BuiltInEvents = typeof BUILT_IN_EVENTS;
@@ -79,6 +87,33 @@ export const mergeRegistry = <E extends EventRegistry>(
   }
   return { ...BUILT_IN_EVENTS, ...events };
 };
+
+// "signup_requested" -> "Signup requested". Words keep their case, so
+// "CTA_click" -> "CTA click"; an explicit `label` is always the better choice
+// for anything an automatic split would get wrong.
+export const humanizeEventName = (name: string): string => {
+  const words = name.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  if (words.length === 0) return name;
+  const [first, ...rest] = words;
+  return [first.charAt(0).toUpperCase() + first.slice(1), ...rest].join(" ");
+};
+
+/**
+ * The display names for a registry: each event's `label`, or its humanised
+ * name. Built-in events are included, so this is the whole lexicon a report
+ * needs. Frozen: it's shared by every report.
+ */
+export const createLexicon = <E extends EventRegistry>(
+  registry: E,
+): Readonly<Record<string, string>> =>
+  Object.freeze(
+    Object.fromEntries(
+      Object.entries(registry).map(([name, spec]) => [
+        name,
+        spec.label ?? humanizeEventName(name),
+      ]),
+    ),
+  );
 
 /** Keep only allow-listed, well-typed props; strings must match SAFE_STRING. */
 export const sanitizeProps = (

@@ -1,8 +1,14 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { createAnalytics, type Dimension } from "../src/index";
+import { createAnalytics, type Dimension, defineEvents } from "../src/index";
 import { db, resetSchema, truncate } from "./helpers";
 
-const analytics = createAnalytics({ db });
+const analytics = createAnalytics({
+  db,
+  events: defineEvents({
+    signup_requested: { source: "server", label: "Signup requested" },
+    cta_click: { source: "client", label: "CTA click" },
+  }),
+});
 const { report } = analytics;
 
 // Two UK days in October (BST, UTC+1) plus one row outside the period.
@@ -118,12 +124,53 @@ describe("report", () => {
     expect(message).toContain("unknown dimension");
   });
 
-  test("eventTallies lists every event with its sources", async () => {
+  test("eventTallies lists every event with its sources and display name", async () => {
     expect(await report.eventTallies(period)).toEqual([
-      { label: "page_view", sources: "server", count: 4, visitors: 3 },
-      { label: "cta_click", sources: "client, server", count: 2, visitors: 1 },
-      { label: "signup_requested", sources: "server", count: 1, visitors: 1 },
+      {
+        name: "page_view",
+        label: "Page view",
+        sources: "server",
+        count: 4,
+        visitors: 3,
+      },
+      {
+        name: "cta_click",
+        label: "CTA click",
+        sources: "client, server",
+        count: 2,
+        visitors: 1,
+      },
+      {
+        name: "signup_requested",
+        label: "Signup requested",
+        sources: "server",
+        count: 1,
+        visitors: 1,
+      },
     ]);
+  });
+
+  test("an event no longer in the registry is humanised, not raw", async () => {
+    await db`INSERT INTO analytics_event
+      (occurred_at, name, source, visitor_hash, route, props)
+    VALUES ('2026-10-06T12:00:00Z', 'legacy_signup', 'server', 'f', '/', '{}')`;
+    const tallies = await report.eventTallies(period);
+    expect(tallies.find((t) => t.name === "legacy_signup")).toEqual({
+      name: "legacy_signup",
+      label: "Legacy signup",
+      sources: "server",
+      count: 1,
+      visitors: 1,
+    });
+  });
+
+  test("the analytics lexicon covers the built-ins and the site's labels", () => {
+    expect(analytics.lexicon).toMatchObject({
+      page_view: "Page view",
+      server_error: "Server error",
+      signup_requested: "Signup requested",
+      cta_click: "CTA click",
+    });
   });
 
   test("a row exactly at `to` is outside the period everywhere", async () => {
@@ -145,7 +192,7 @@ describe("report", () => {
     const hosts = await report.breakdown(period, "referrer_host");
     expect(hosts.map((r) => r.label)).not.toContain("edge.test");
     const tallies = await report.eventTallies(period);
-    expect(tallies.find((t) => t.label === "page_view")?.count).toBe(4);
+    expect(tallies.find((t) => t.name === "page_view")?.count).toBe(4);
   });
 
   test("an empty period gives zeros and empty buckets", async () => {

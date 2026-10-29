@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0]
+
+Added
+
+- Event labels: an `EventSpec` takes an optional `label`, the human-readable name a report shows — `{ source: "server", label: "Signup requested" }`. Presentation only: the name is still the key a beacon sends and the column stores, so a label can change without a migration or touching stored rows. Leave it out and the name is humanised (`cta_click` → "Cta click").
+- `createLexicon(registry)` and `humanizeEventName(name)` from `./events`, and `analytics.lexicon`: the whole name → display-name mapping, built-ins included (`page_view` → "Page view"). A name that has left the registry still resolves, humanised, so reports of older rows don't show raw identifiers.
+- The four built-in events carry labels.
+
+Changed
+
+- `report.eventTallies()` returns `{ name, label, sources, count, visitors }`: `name` is the stored identifier and `label` its display name. Code that read `.label` as the raw name should read `.name`.
+
 ## [0.2.0]
 
 Added

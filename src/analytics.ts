@@ -20,6 +20,7 @@ import {
 } from "./endpoint";
 import {
   type BuiltInEvents,
+  createLexicon,
   type EventProps,
   type EventRegistry,
   mergeRegistry,
@@ -196,6 +197,9 @@ export const createAnalytics = <
 
   const { db } = config;
   const registry: Registry = mergeRegistry(config.events ?? ({} as E));
+  // Display names for the read side. Built-ins included; a name that has left
+  // the registry still shows up humanised rather than raw.
+  const lexicon = createLexicon(registry);
   const timeZone = config.timeZone ?? "Europe/London";
   assertTimeZone(timeZone);
   const rounding = config.roundTimestamps ?? "hour";
@@ -496,6 +500,8 @@ export const createAnalytics = <
   return {
     /** The merged registry: the built-in events plus the site's own. */
     events: registry,
+    /** Event name → display name, built-ins included, e.g. `{ page_view: "Page view" }`. */
+    lexicon,
     timeZone,
     track,
     recordEvent,
@@ -505,7 +511,7 @@ export const createAnalytics = <
     /** POST handler for the events endpoint. Always answers 204. */
     handleEvents,
     purgeExpired,
-    report: createReport(db, timeZone),
+    report: createReport(db, timeZone, lexicon),
     /** Start of the local day `daysBack` days before `now`'s, in the configured zone. */
     startOfDay: (now = new Date(), daysBack = 0) =>
       startOfDay(timeZone, now, daysBack),

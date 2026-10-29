@@ -30,10 +30,12 @@ export {
 export {
   BUILT_IN_EVENTS,
   type ClientEventName,
+  createLexicon,
   defineEvents,
   type EventProps,
   type EventRegistry,
   type EventSpec,
+  humanizeEventName,
   type PropSpec,
   type PropsOf,
   sanitizeProps,
