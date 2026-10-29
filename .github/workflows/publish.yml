@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -96,6 +96,34 @@ jobs:
           version=$(node -p "require('./package.json').version")
           if npm view "$name@$version" version >/dev/null 2>&1; then
             echo "::notice::$name@$version is already on npm; nothing to publish"
-            exit 0
+          else
+            npm publish --provenance --access public
           fi
-          npm publish --provenance --access public
+
+      # npm accepts the upload before it serves the version: new publishes go
+      # through a malware scan and the registry prints "being processed" while
+      # it does. Until then the version 404s, so a green run is not proof the
+      # release is installable. Poll the version endpoint rather than
+      # installing: a 404 from the install CDN edge is cached for five minutes
+      # and outlives the real one, which makes a good release look broken.
+      - name: Wait until npm serves the version
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          url="https://registry.npmjs.org/${name/\//%2F}/$version"
+          deadline=$((SECONDS + 900))
+          while :; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H 'Cache-Control: no-cache' "$url" || true)
+            if [ "$code" = "200" ]; then
+              echo "$name@$version is live"
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::npm has not served $name@$version within 15 minutes of accepting it. Nothing is lost: re-run this workflow once the version appears, the publish step skips."
+              exit 1
+            fi
+            echo "npm answered $code; waiting"
+            sleep 10
+          done
+
