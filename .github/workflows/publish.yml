@@ -1,0 +1,101 @@
+name: Publish
+
+# Tag a commit vX.Y.Z and push the tag. The tag must match package.json.
+#
+# npm trusted publishing (OIDC) is configured for this package and is bound to
+# THIS FILENAME. Renaming or moving it breaks every publish, and there is
+# deliberately no NPM_TOKEN: a token would take precedence over the OIDC
+# exchange and is rejected for a trusted publisher.
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # the credential npm exchanges for a short-lived publish token
+
+jobs:
+  verify:
+    name: Lint, typecheck & test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: billet-analytics-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/billet-analytics-test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun test
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check the tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      # Trusted publishing needs npm >= 11.5.1. Node 24 bundles a new enough
+      # npm, but that is an assumption about the base image, so the floor is
+      # asserted: below it, npm silently skips OIDC and fails at publish with
+      # an auth error, which reads like a credentials problem and invites a
+      # token that trusted publishing rejects.
+      - name: Check npm supports trusted publishing
+        run: |
+          npm install -g 'npm@^11'
+          npm --version
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!ok) {
+              console.error(`::error::npm ${process.argv[1]} is below 11.5.1, which trusted publishing requires`);
+              process.exit(1);
+            }
+          ' "$(npm --version)"
+
+      - run: bun install --frozen-lockfile
+
+      # No build step: the package ships its TypeScript sources. This checks
+      # the tarball contains what `files` promises before it is pushed.
+      - run: npm pack --dry-run
+
+      - name: Publish
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::notice::$name@$version is already on npm; nothing to publish"
+            exit 0
+          fi
+          npm publish --provenance --access public

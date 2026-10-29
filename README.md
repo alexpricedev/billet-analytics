@@ -47,7 +47,7 @@ changing any privacy default.
 ## For AI agents
 
 - **Package**: `@alexpricedev/billet-analytics`
-- **Install**: `bun add github:alexpricedev/billet-analytics#v0.2.0` (not on npm yet — pin the tag, see [Install and add the migration](#1-install-and-add-the-migration))
+- **Install**: `bun add @alexpricedev/billet-analytics` from npm (see [Install and add the migration](#1-install-and-add-the-migration))
 - **Runtime**: Bun ≥ 1.2, PostgreSQL. Uses Bun's `SQL`; no other dependencies.
 - **Exports**: `.` (server), `./client` (browser `send()`, `createClient`), `./events` (`defineEvents`, browser-safe), `./migration` (`up`/`down`)
 - **Tables**: `analytics_event`, `analytics_salt`, created by the package's migration
@@ -86,10 +86,10 @@ Paths below are Billet's. Adapt them where your app differs.
 ### 1. Install and add the migration
 
 ```bash
-bun add github:alexpricedev/billet-analytics#v0.2.0
+bun add @alexpricedev/billet-analytics
 ```
 
-Pin the tag. Without `#v0.2.0` the dependency tracks `main`, so `bun install` on a fresh checkout can pull a different version than the one you tested. Releases are tagged `vX.Y.Z` ([all tags](https://github.com/alexpricedev/billet-analytics/tags)); bump the tag deliberately and read [CHANGELOG.md](CHANGELOG.md).
+Pin the version if you want `bun install` to stay on what you tested: `bun add @alexpricedev/billet-analytics@0.2.0`. Releases are tagged `vX.Y.Z` ([all tags](https://github.com/alexpricedev/billet-analytics/tags)) and published to npm by [`.github/workflows/publish.yml`](.github/workflows/publish.yml); read [CHANGELOG.md](CHANGELOG.md) before bumping. To test an unreleased commit, install from git and pin the tag: `bun add github:alexpricedev/billet-analytics#v0.2.0`.
 
 Add one file to `src/server/database/migrations/` (name it with today's timestamp):
 
@@ -449,6 +449,24 @@ bun test        # the database tests drop and recreate the two tables
 ```
 
 `.env.test` is not optional. The tests drop and recreate `analytics_event` and `analytics_salt`, so they refuse to start unless `DATABASE_URL` names a database ending in `-test`. Bun loads `.env.test` over `.env` under `NODE_ENV=test`, which `bun test` sets.
+
+### Releasing
+
+Publishing is done by GitHub Actions on a tag, not from a laptop:
+
+```bash
+# 1. Move the version in package.json and add a CHANGELOG section.
+# 2. Commit and merge to main.
+git checkout main && git pull
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin v0.3.0
+```
+
+`.github/workflows/publish.yml` then lints, typechecks and tests the tagged commit, checks the tag matches `package.json` (a mismatch fails before anything is pushed), and runs `npm publish --provenance --access public`. Re-running the job is safe: if the version is already on npm it reports that and stops.
+
+Authentication is [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/): there is no `NPM_TOKEN`. The package is bound to `alexpricedev/billet-analytics` and the workflow file `publish.yml`, and the runner exchanges a GitHub OIDC token for a short-lived credential. Renaming or moving that file breaks publishing. npm needs to be 11.5.1 or newer, which the workflow installs and asserts. Provenance is generated from the same OIDC token, so each version links to its commit and workflow run.
+
+The package ships its TypeScript sources; there is no build artifact to attach, and `npm pack --dry-run` in the workflow confirms the `files` list before pushing.
 
 ## License
 
