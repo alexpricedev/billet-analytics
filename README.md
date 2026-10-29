@@ -468,6 +468,8 @@ Authentication is [npm trusted publishing](https://docs.npmjs.com/trusted-publis
 
 The package ships its TypeScript sources; there is no build artifact to attach, and `npm pack --dry-run` in the workflow confirms the `files` list before pushing.
 
+npm accepts a publish before it serves it — new uploads are scanned, and the registry answers 404 until that finishes, usually a few minutes. The last step polls the version endpoint until it resolves, so a green run means installable, not merely accepted. That wait is why a release takes a few minutes.
+
 ## License
 
 MIT © Alex Price
